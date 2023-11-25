@@ -350,3 +350,577 @@ COMMIT;
 ```
 
 ## RESTfull сервіс для управління даними
+
+### Database schema (ORM Prisma)
+
+```
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            Int            @id @default(autoincrement())
+  firstName     String         @map("first_name")
+  lastName      String         @map("last_name")
+  username      String         @unique
+  email         String         @unique
+  password      String
+  role          Role           @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  roleId        Int            @map("role_id")
+  actions       Action[]
+  feedbacks     Feedback[]
+  mediaRequests MediaRequest[]
+
+  @@map("users")
+}
+
+enum RoleName {
+  USER
+  TECHNICAL_EXPERT
+}
+
+model Role {
+  id          Int                 @id @default(autoincrement())
+  name        RoleName
+  description String?
+  users       User[]
+  permissions RoleHasPermission[]
+
+  @@map("roles")
+}
+
+model RoleHasPermission {
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  roleId       Int        @map("role_id")
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  permissionId Int        @map("permission_id")
+
+  @@id([roleId, permissionId])
+  @@map("role_has_permission")
+}
+
+model Permission {
+  id    Int                 @id @default(autoincrement())
+  name  String
+  roles RoleHasPermission[]
+
+  @@map("permissions")
+}
+
+model Feedback {
+  id             Int          @id @default(autoincrement())
+  body           String?
+  rating         Float
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         Int          @map("user_id")
+  mediaRequest   MediaRequest @relation(fields: [mediaRequestId], references: [id], onDelete: Cascade)
+  mediaRequestId Int          @map("media_request_id")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  @@map("feedbacks")
+}
+
+model MediaRequest {
+  id          Int        @id @default(autoincrement())
+  name        String
+  description String?
+  keywords    String?
+  type        String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      Int        @map("user_id")
+  feedbacks   Feedback[]
+  sources     BasedOn[]
+  actions     Action[]
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  @@map("media_requests")
+}
+
+model BasedOn {
+  source         Source       @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  sourceId       Int          @map("source_id")
+  mediaRequest   MediaRequest @relation(fields: [mediaRequestId], references: [id], onDelete: Cascade)
+  mediaRequestId Int          @map("media_request_id")
+
+  @@id([sourceId, mediaRequestId])
+  @@map("based_on")
+}
+
+model Source {
+  id            Int       @id @default(autoincrement())
+  name          String
+  url           String
+  mediaRequests BasedOn[]
+  labels        Label[]
+  actions       Action[]
+
+  @@map("sources")
+}
+
+model Label {
+  source   Source @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  sourceId Int    @map("source_id")
+  tag      Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  tagId    Int    @map("tag_id")
+
+  @@id([sourceId, tagId])
+  @@map("labels")
+}
+
+enum TagName {
+  SPORT
+  SCIENCE_AND_TECHOLOGY
+  ENTERTAINMENT
+  FASHION_AND_STYLE
+  MUSIC
+  FOOD_AND_COOKING
+  TOURISM
+  MOVIES_AND_TELEVISION
+}
+
+model Tag {
+  id     Int     @id @default(autoincrement())
+  name   TagName
+  labels Label[]
+
+  @@map("tags")
+}
+
+model Action {
+  mediaRequest   MediaRequest @relation(fields: [mediaRequestId], references: [id], onDelete: Cascade)
+  mediaRequestId Int          @map("media_request_id")
+  source         Source       @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  sourceId       Int          @map("source_id")
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         Int          @map("user_id")
+  state          State        @relation(fields: [stateId], references: [id], onDelete: Cascade)
+  stateId        Int          @map("state_id")
+
+  @@id([mediaRequestId, sourceId, userId, stateId])
+  @@map("actions")
+}
+
+enum StateName {
+  SUBSCRIBE
+  UNSUBSCRIBE
+  QUARANTINE
+}
+
+model State {
+  id          Int       @id @default(autoincrement())
+  displayName StateName @map("display_name")
+  actions     Action[]
+
+  @@map("states")
+}
+```
+
+### Database connection service
+
+```ts
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
+
+@Injectable()
+export class PrismaService extends PrismaClient implements OnModuleInit {
+  async onModuleInit() {
+    return this.$connect;
+  }
+}
+```
+
+### Database connection module
+
+```ts
+import { Global, Module } from '@nestjs/common';
+import { PrismaService } from './prisma.service';
+
+@Global()
+@Module({
+  providers: [PrismaService],
+  exports: [PrismaService],
+})
+export class PrismaModule {}
+```
+
+### Module and controller for processing requests
+
+```ts
+import { Module } from '@nestjs/common';
+import { SourceController } from './source.controller';
+import { SourceService } from './source.service';
+
+@Module({
+  controllers: [SourceController],
+  providers: [SourceService],
+})
+export class SourceModule {}
+```
+
+```ts
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
+import { SourceService } from './source.service';
+import { CreateSourceDTO, UpdateSourceDTO } from './dtos';
+import { SourceResponse } from './responses/source.response';
+import {
+  ApiBadRequestResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiParam,
+  ApiTags,
+} from '@nestjs/swagger';
+import { SourceByIdPipe } from './pipes/source-by-id.pipe';
+
+@ApiTags('sorces')
+@Controller('sources')
+export class SourceController {
+  constructor(private readonly sourceService: SourceService) {}
+
+  @ApiOkResponse({
+    type: SourceResponse,
+  })
+  @ApiBadRequestResponse({
+    description: `
+      Name cannot be empty
+      Name must be a string
+      Url cannot be empty
+      Url must be a URL address`,
+  })
+  @ApiNotFoundResponse({
+    description: `
+      Source with such id does not exist`,
+  })
+  @ApiOperation({
+    summary: 'Create a source',
+  })
+  @Post()
+  async createSource(@Body() body: CreateSourceDTO): Promise<SourceResponse> {
+    return await this.sourceService.createSource(body);
+  }
+
+  @ApiOkResponse({
+    type: SourceResponse,
+  })
+  @ApiNotFoundResponse({
+    description: `
+      Source with such id does not exist`,
+  })
+  @ApiParam({
+    name: 'id',
+    type: Number,
+    required: true,
+    description: 'The id of the source',
+  })
+  @ApiOperation({
+    summary: 'Retrieve a source by id',
+  })
+  @Get(':id')
+  async getSource(@Param('id', ParseIntPipe, SourceByIdPipe) id: number): Promise<SourceResponse> {
+    return await this.sourceService.getSource(id);
+  }
+
+  @ApiOkResponse({
+    type: [SourceResponse],
+  })
+  @ApiOperation({
+    summary: 'Retriev all existing sources',
+  })
+  @Get()
+  async getAllSources(): Promise<SourceResponse[]> {
+    return await this.sourceService.getAllSources();
+  }
+
+  @ApiOkResponse({
+    type: SourceResponse,
+  })
+  @ApiBadRequestResponse({
+    description: `
+      Name must be a string
+      Url must be a URL address`,
+  })
+  @ApiNotFoundResponse({
+    description: `
+      Source with such id does not exist`,
+  })
+  @ApiParam({
+    name: 'id',
+    type: Number,
+    required: true,
+    description: 'The id of the source',
+  })
+  @ApiOperation({
+    summary: 'Update an existing source by its id',
+  })
+  @Patch(':id')
+  async updateSource(
+    @Param('id', ParseIntPipe, SourceByIdPipe) id: number,
+    @Body() body: UpdateSourceDTO,
+  ): Promise<SourceResponse> {
+    return await this.sourceService.updateSource(id, body);
+  }
+
+  @ApiOkResponse({
+    type: SourceResponse,
+  })
+  @ApiNotFoundResponse({
+    description: `
+      Source with such id does not exist`,
+  })
+  @ApiParam({
+    name: 'id',
+    type: Number,
+    required: true,
+    description: 'The id of the source',
+  })
+  @ApiOperation({
+    summary: 'Delete a source by id',
+  })
+  @Delete(':id')
+  async deleteSouce(
+    @Param('id', ParseIntPipe, SourceByIdPipe) id: number,
+  ): Promise<SourceResponse> {
+    return await this.sourceService.deleteSource(id);
+  }
+}
+```
+
+### Service for processing requests
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from 'src/prisma/prisma.service';
+import { CreateSourceDTO, UpdateSourceDTO } from './dtos';
+import { SourceResponse } from './responses/source.response';
+
+@Injectable()
+export class SourceService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async createSource(data: CreateSourceDTO): Promise<SourceResponse> {
+    return this.prisma.source.create({
+      data,
+    });
+  }
+
+  async getSource(id: number): Promise<SourceResponse> {
+    return this.prisma.source.findUnique({
+      where: {
+        id,
+      },
+    });
+  }
+
+  async getAllSources(): Promise<SourceResponse[]> {
+    return this.prisma.source.findMany();
+  }
+
+  async updateSource(id: number, data: UpdateSourceDTO): Promise<SourceResponse> {
+    return this.prisma.source.update({
+      data,
+      where: {
+        id,
+      },
+    });
+  }
+
+  async deleteSource(id: number): Promise<SourceResponse> {
+    return this.prisma.source.delete({
+      where: {
+        id,
+      },
+    });
+  }
+}
+```
+
+### DTO for creating sources
+
+```ts
+import { ApiProperty } from '@nestjs/swagger';
+import { IsNotEmpty, IsString, IsUrl } from 'class-validator';
+
+export class CreateSourceDTO {
+  @ApiProperty({
+    description: 'The name of the source',
+  })
+  @IsNotEmpty({ message: 'Name cannot be empty' })
+  @IsString({ message: 'Name must be a string' })
+  name: string;
+
+  @ApiProperty({
+    description: 'The url of the source',
+  })
+  @IsNotEmpty({ message: 'Url cannot be empty' })
+  @IsUrl({}, { message: 'Url must be a URL address' })
+  url: string;
+}
+```
+
+### DTO for updating sources
+
+```ts
+import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptional, IsString, IsUrl } from 'class-validator';
+
+export class UpdateSourceDTO {
+  @ApiPropertyOptional({
+    description: 'The name of the source',
+  })
+  @IsString({ message: 'Name must be a string' })
+  @IsOptional()
+  name?: string;
+
+  @ApiPropertyOptional({
+    description: 'The url of the source',
+  })
+  @IsUrl({}, { message: 'Url must be a URL address' })
+  @IsOptional()
+  url?: string;
+}
+```
+
+### Source response
+
+```ts
+import { ApiProperty } from '@nestjs/swagger';
+
+export class SourceResponse {
+  @ApiProperty({
+    description: 'The id of the source',
+  })
+  id: number;
+
+  @ApiProperty({
+    description: 'The name of the source',
+  })
+  name: string;
+
+  @ApiProperty({
+    description: 'The url of the source',
+  })
+  url: string;
+}
+```
+
+### Exception for invalid entity identifier
+
+```ts
+import { HttpException, HttpStatus } from '@nestjs/common';
+
+export class InvalidEntityIdException extends HttpException {
+  constructor(entity: string) {
+    super(`${entity} with such id does not exist`, HttpStatus.NOT_FOUND);
+  }
+}
+```
+
+### Validation pipe for handling client errors
+
+```ts
+import { Injectable, PipeTransform } from '@nestjs/common';
+import { PrismaService } from 'src/prisma/prisma.service';
+import { InvalidEntityIdException } from '../exceptions/InvalidEntityIdException';
+
+@Injectable()
+export class SourceByIdPipe implements PipeTransform {
+  constructor(private prisma: PrismaService) {}
+
+  async transform(id: number) {
+    const source = await this.prisma.source.findFirst({
+      where: {
+        id,
+      },
+    });
+
+    if (!source) {
+      throw new InvalidEntityIdException('Source');
+    }
+
+    return id;
+  }
+}
+```
+
+### Main app module of RESTfull service
+
+```ts
+import { Module } from '@nestjs/common';
+import { SourceModule } from './source/source.module';
+import { PrismaModule } from './prisma/prisma.module';
+
+@Module({
+  imports: [SourceModule, PrismaModule],
+})
+export class AppModule {}
+```
+
+### Entry point for launching the application
+
+```ts
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { ValidationPipe } from '@nestjs/common';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+    }),
+  );
+
+  const config = new DocumentBuilder()
+    .setTitle('Source API')
+    .setDescription('Restful service for source API')
+    .setVersion('1.0')
+    .build();
+
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('api', app, document);
+
+  await app.listen(3000);
+}
+bootstrap();
+```
+
+## Swagger documentation
+
+### POST /sources
+
+<p>
+  <img src="./media/post-swagger.png">
+</p>
+
+### GET(all) /sources
+
+<p>
+  <img src="./media/get-all-swagger.png">
+</p>
+
+### GET /sources/{id}
+
+<p>
+  <img src="./media/get-swagger.png">
+</p>
+
+### PATCH /sources/{id}
+
+<p>
+  <img src="./media/patch-swagger.png">
+</p>
+
+### DELETE /sources/{id}
+
+<p>
+  <img src="./media/delete-swagger.png">
+</p>
